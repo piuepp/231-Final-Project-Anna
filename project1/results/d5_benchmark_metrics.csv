@@ -1,0 +1,5 @@
+Strategy,Cumulative Return,Annualized Return,Annualized Volatility,Sharpe Ratio,Max Drawdown,Win Rate
+Benchmark1_SMAcross,72.00%,11.51%,18.98%,0.6061,-37.71%,51.67%
+Benchmark2_TrailingRet,239.09%,27.79%,27.60%,1.0068,-43.25%,52.55%
+New1_RiskAdjMomentum,217.26%,26.09%,22.49%,1.1598,-31.27%,51.83%
+New2_RegimeMomentum,142.30%,19.45%,16.71%,1.1639,-13.15%,40.91%

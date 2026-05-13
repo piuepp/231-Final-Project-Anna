@@ -1,0 +1,17 @@
+# Virtual environment
+231Final/
+
+# LaTeX temp files
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store

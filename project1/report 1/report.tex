@@ -1,0 +1,544 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{fancyvrb}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage{parskip}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black,
+    citecolor=blue!60!black
+}
+
+\DefineVerbatimEnvironment{codeblock}{Verbatim}{
+    fontsize=\small,
+    frame=single,
+    framesep=3pt,
+    rulecolor=\color{gray!60}
+}
+
+\title{\textbf{INDENG 231 Course Project 1}\\[0.4em]
+\large Building a Backtesting Simulation System for Trading Strategies}
+\author{Anna Chen}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{System Design and Assumptions}
+% =============================================================================
+
+\subsection{What I Built}
+
+The goal of this project was to build a backtesting system from scratch --- something
+that lets you try out a trading strategy on five years of historical Nasdaq-100 data
+and immediately see how it would have performed.
+Rather than cramming everything into one giant script, I split the code into focused
+modules: one for loading data, one for the engine that runs the simulation, one for
+computing performance metrics, and a folder for all the trading strategies.
+This way, if you want to test a brand-new strategy, you only need to write the strategy
+itself. Everything else --- the simulation loop, the trade execution, the output charts ---
+just works without any changes.
+
+\subsection{Ground Rules (Assumptions)}
+
+Before diving into the results, here are the constraints built into the system:
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Trades happen at the closing price.}
+          Every buy or sell is executed at that day's closing price.
+          There's no simulated slippage or intraday movement.
+
+    \item \textbf{No peeking at the future.}
+          When the strategy decides what to hold on day $t$, it only sees prices
+          up to and including day $t$. Future prices are completely hidden.
+
+    \item \textbf{No short selling.}
+          All portfolio weights are clamped to be non-negative.
+
+    \item \textbf{No leverage.}
+          Weights are capped so they always sum to at most 1.
+          Anything leftover stays in cash.
+
+    \item \textbf{Cash earns nothing.}
+          Uninvested money just sits there at a 0\% interest rate.
+
+    \item \textbf{Transaction costs are optional.}
+          The engine supports a flat-rate cost on traded notional,
+          but all experiments in this report use zero transaction cost
+          to keep things clean and comparable.
+
+    \item \textbf{Stocks with missing prices are skipped.}
+          If a stock has no closing price on a given day, its existing shares
+          are carried over and no trade is made.
+\end{itemize}
+
+\subsection{How the Code is Organised}
+
+Here's a quick map of the project:
+
+\begin{codeblock}
+Final Project/
+|-- run_backtest.py               # Run this to reproduce all results
+|-- requirements.txt
+|-- nasdaq100_daily_5y.csv        # Raw data
+|-- results/                      # All output charts and tables go here
+\-- backtester/
+    |-- data.py                   # Loads and reshapes the CSV
+    |-- engine.py                 # The simulation loop
+    |-- metrics.py                # Sharpe, drawdown, win rate, etc.
+    \-- strategies/
+        |-- base.py               # The Strategy interface (abstract class)
+        |-- single_stock.py       # Momentum, Mean Reversion, RSI, Bollinger, MACD
+        |-- portfolio.py          # SMA crossover, Trailing return (+weighting variants)
+        \-- advanced.py           # The two new strategies from Deliverable 5
+\end{codeblock}
+
+\paragraph{How the pieces fit together.}
+Figure~\ref{fig:arch} shows the flow of data through the system.
+The \texttt{DataLoader} reads the CSV file and turns it into a clean price table
+(rows = dates, columns = tickers).
+The \texttt{BacktestEngine} then steps through each trading day one at a time.
+On each day, it hands the strategy a slice of the price history up to that date,
+gets back a dictionary of target weights, and executes the implied trades at the
+closing price.
+After the full simulation, performance metrics are computed and everything gets
+saved to the \texttt{results/} folder.
+
+\begin{figure}[H]
+\centering
+\begin{minipage}{0.82\textwidth}
+\small
+\begin{codeblock}
+CSV file
+   |
+   v
+DataLoader  --(prices table)-->  BacktestEngine
+                                       |
+                           for each trading day t:
+                             prices[:t] --> Strategy.generate_weights()
+                                       |
+                                  target weights
+                                       |
+                              execute trades at closing price
+                              record portfolio NAV
+                                       |
+                                       v
+                              NAV series --> metrics.py --> CSV / PNG
+\end{codeblock}
+\end{minipage}
+\caption{Data flow through the backtesting system.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Adding a New Strategy}
+
+The key design decision was to define a single, simple interface that every strategy
+must follow.
+To add a new strategy, you just create a Python class that inherits from
+\texttt{Strategy} and implement one method:
+
+\begin{codeblock}
+class Strategy(ABC):
+    @abstractmethod
+    def generate_weights(self, prices: pd.DataFrame, current_date) -> dict:
+        """Return {ticker: weight}, weights in [0,1], sum <= 1."""
+        ...
+\end{codeblock}
+
+That's it. The engine, the metrics, and the reporting code don't need to know
+anything about the strategy's internals.
+
+% =============================================================================
+\section{How to Read the Results}
+% =============================================================================
+
+Every strategy gets evaluated on the same six metrics:
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Cumulative Return}: how much money you'd have made in total
+          over the full five years, expressed as a percentage gain:
+          $\text{NAV}_T / \text{NAV}_0 - 1$.
+
+    \item \textbf{Annualised Return}: the equivalent average yearly return,
+          $(1 + R_{\text{cum}})^{252/T} - 1$, where $T$ is the number of
+          trading days in the backtest.
+
+    \item \textbf{Annualised Volatility}: how much the daily returns bounced
+          around, scaled up to a yearly figure ($\text{daily std} \times \sqrt{252}$).
+
+    \item \textbf{Sharpe Ratio}: the main summary metric --- return per unit of
+          risk, $(\mu_{\text{ann}} - r_f) / \sigma_{\text{ann}}$ with $r_f = 0$.
+          Higher is better.
+
+    \item \textbf{Maximum Drawdown}: the worst peak-to-trough drop in portfolio
+          value during the backtest,
+          $\min_t (\text{NAV}_t / \max_{s \le t} \text{NAV}_s - 1)$.
+          Think of this as ``the worst you would have felt holding this strategy.''
+
+    \item \textbf{Win Rate}: the fraction of days where the portfolio went up.
+          Useful context, but not the whole story --- a strategy that wins
+          only 35\% of days can still be very profitable if the winning days
+          are much bigger than the losing ones.
+\end{itemize}
+
+The Sharpe ratio is probably the most useful single number because it captures
+both return \emph{and} risk.
+Maximum drawdown is the most gut-check relevant number --- most real investors
+would stop following a strategy long before it hits its worst drawdown.
+
+% =============================================================================
+\section{Deliverable 3: Testing Strategies on a Single Stock (NVDA)}
+% =============================================================================
+
+\subsection{Why NVDA?}
+
+I picked NVIDIA (NVDA) as the test stock because it's one of the most interesting
+stories of the past five years: a chip company that became the poster child for the
+AI boom and saw its stock price increase by over 10x from 2021 to 2026.
+That kind of sustained, dramatic trend makes it a great stress test for seeing
+which strategies can actually ride a winner versus which ones get left behind.
+
+\subsection{The Five Strategies}
+
+\paragraph{1. Momentum (two versions).}
+The simplest trend-following idea: if the stock is above its moving average,
+buy it; otherwise hold cash.
+I tested two window lengths --- a short 20-day MA and a longer 50-day MA ---
+to see how sensitive the results are to that choice.
+
+\paragraph{2. Mean Reversion.}
+The opposite bet: if the stock has dropped a lot recently (specifically, more than
+one standard deviation below its 20-day average), buy it expecting a bounce.
+Exit back to cash once the price recovers above the average.
+
+\paragraph{3. RSI (Relative Strength Index).}
+Another mean-reversion approach, this time using RSI instead of z-scores.
+The idea: buy when the 14-day RSI drops below 30 (the stock is ``oversold''),
+and sell when it climbs above 70 (``overbought'').
+
+\paragraph{4. Bollinger Bands.}
+Buy when the price falls below the lower Bollinger Band (the 20-day average
+minus two standard deviations), which signals an unusually large dip.
+Exit when the price recovers back to the middle band.
+
+\paragraph{5. MACD Crossover.}
+A classic momentum-meets-trend-detection tool.
+We use the standard 12/26/9 settings: go long when the MACD line crosses above
+its signal line, and exit when it crosses back below.
+
+\subsection{Results}
+
+\begin{table}[H]
+\centering
+\caption{Single-stock backtesting results for NVDA (Apr 2021 -- Apr 2026).}
+\label{tab:d3}
+\begin{tabular}{lrrrrrr}
+\toprule
+Strategy & Cum.\ Ret. & Ann.\ Ret. & Ann.\ Vol. & Sharpe & Max DD & Win Rate \\
+\midrule
+Momentum (MA-20)              & 596.82\% & 47.67\% & 36.88\% & 1.2927 & $-$52.38\% & 32.38\% \\
+Momentum (MA-50)              & 512.56\% & 43.90\% & 38.41\% & 1.1430 & $-$32.13\% & 34.05\% \\
+Mean Reversion (z=1)          & 120.58\% & 17.22\% & 31.87\% & 0.5401 & $-$45.96\% & 16.83\% \\
+RSI (14, 30/70)               & 255.33\% & 28.99\% & 31.25\% & 0.9279 & $-$35.65\% & 17.54\% \\
+Bollinger Band (20, 2$\sigma$) & 216.17\% & 26.00\% & 26.13\% & 0.9951 & $-$39.98\% &  9.89\% \\
+MACD (12, 26, 9)              & 256.72\% & 29.09\% & 35.90\% & 0.8104 & $-$52.19\% & 26.95\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{results/d3_single_stock_nav.png}
+\caption{Portfolio value over time for each single-stock strategy on NVDA
+         (normalised to 1 at the start).}
+\label{fig:d3}
+\end{figure}
+
+\subsection{What the Numbers Tell Us}
+
+\textbf{Momentum is the clear winner --- by a lot.}
+The 20-day momentum strategy returned 597\% over five years with a Sharpe of 1.29.
+This makes sense: NVDA spent most of this period in a strong uptrend, so a strategy
+that simply asks ``is the stock above its recent average?'' and stays long when the
+answer is yes captured most of that move.
+
+\textbf{Mean reversion struggled badly.}
+A stock climbing 10x doesn't ``revert.'' The mean-reversion strategy kept waiting
+for big dips to buy, spending a lot of time in cash, and only managed 120\% total.
+The lesson here is that mean reversion only makes sense for stocks that actually
+bounce around a stable price level --- not for NVDA.
+
+\textbf{RSI and Bollinger Bands landed in the middle.}
+Both are essentially ways of buying dips, so they do capture some upside during
+pullbacks, but they miss the big runs. The Bollinger Band strategy has the lowest
+win rate of all (under 10\% of days are profitable) because it only enters on extreme
+dips --- but when it does, the trades tend to pay off well. Its Sharpe (0.99) is
+actually pretty competitive.
+
+\textbf{MACD was decent but noisy.}
+The MACD signal is slow to react because it uses a 26-day lagging EMA, so it
+often enters trends late. Returns are similar to RSI but with higher volatility,
+which drags the Sharpe down to 0.81.
+
+% =============================================================================
+\section{Deliverable 4: Building a Full Portfolio}
+% =============================================================================
+
+\subsection{From One Stock to 101}
+
+Single-stock backtesting tells you how a strategy performs on one name,
+but the more interesting (and realistic) question is: what happens when
+you apply it across the whole Nasdaq-100 and turn the signals into a portfolio?
+
+I tested two different ways of selecting stocks and two different ways
+of deciding how much to put into each one, giving four combinations in total.
+
+\subsubsection{Stock Selection Signals}
+
+\paragraph{SMA Crossover.}
+For each of the 101 stocks, compute a 20-day and a 50-day simple moving average.
+If the short-term average is above the long-term one, that stock gets included in
+the portfolio. This is a classic ``trend is your friend'' filter.
+
+\paragraph{Trailing Return Momentum.}
+Look at each stock's return over the past 30 days, rank all 101 stocks,
+and take the top 10.
+This is a straightforward cross-sectional momentum rule: bet on what's been
+working lately.
+
+\subsubsection{Weighting Schemes}
+
+\paragraph{Uniform weighting.}
+Split the portfolio equally across all selected stocks:
+\[
+w_{i,t} = \frac{1}{|\mathcal{S}_t|}, \quad i \in \mathcal{S}_t.
+\]
+
+\paragraph{Risk-adjusted (inverse-volatility) weighting.}
+Instead of equal weights, allocate more to stable stocks and less to volatile ones.
+Specifically, each stock's weight is proportional to the inverse of its recent
+30-day volatility:
+\[
+\tilde{w}_{i,t} = \frac{1}{\hat{\sigma}_{i,t}}, \qquad
+w_{i,t} = \frac{\tilde{w}_{i,t}}{\sum_{j \in \mathcal{S}_t} \tilde{w}_{j,t}}.
+\]
+The idea is to prevent a handful of wild stocks from dominating the portfolio.
+
+\subsection{Results}
+
+\begin{table}[H]
+\centering
+\caption{Portfolio backtesting results across all 101 Nasdaq-100 stocks
+         (Apr 2021 -- Apr 2026).}
+\label{tab:d4}
+\begin{tabular}{lrrrrrr}
+\toprule
+Strategy & Cum.\ Ret. & Ann.\ Ret. & Ann.\ Vol. & Sharpe & Max DD & Win Rate \\
+\midrule
+SMA Crossover + Uniform      &  72.00\% & 11.51\% & 18.98\% & 0.6061 & $-$37.71\% & 51.67\% \\
+SMA Crossover + Risk-Adj.    &  52.55\% &  8.85\% & 16.13\% & 0.5485 & $-$32.92\% & 51.04\% \\
+Trailing Return + Uniform    & 239.09\% & 27.79\% & 27.60\% & 1.0068 & $-$43.25\% & 52.55\% \\
+Trailing Return + Risk-Adj.  & 158.27\% & 20.99\% & 25.44\% & 0.8249 & $-$44.00\% & 52.31\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{results/d4_portfolio_nav.png}
+\caption{Portfolio value over time for each portfolio-level strategy.}
+\label{fig:d4}
+\end{figure}
+
+\subsection{Key Takeaways}
+
+\textbf{Picking the right stocks matters more than how you weight them.}
+Whether you use uniform or risk-adjusted weights, the trailing-return signal
+comfortably beats the SMA crossover signal. SMA crossover tends to select a broad
+swath of stocks (sometimes 50+ at once), which dilutes the signal. Trailing return
+picks just the top 10, keeping the portfolio concentrated in whatever's actually
+working.
+
+\textbf{Risk-adjusted weighting actually hurt performance here.}
+This one is a bit counterintuitive. You'd expect inverse-vol weighting to help by
+reducing exposure to risky names --- and it does lower volatility (slightly).
+But in this particular period, the high-volatility Nasdaq stocks (NVDA, TSLA, MSTR, etc.)
+were also the ones with the best returns. By underweighting them, the risk-adjusted
+portfolios left a lot of return on the table without getting a commensurate reduction
+in drawdown.
+
+\textbf{Bottom line: Trailing Return + Uniform is the best portfolio here at Sharpe 1.01.}
+This becomes the harder of the two benchmarks to beat in Deliverable 5.
+
+% =============================================================================
+\section{Deliverable 5: Two New Strategies That Beat the Benchmarks}
+% =============================================================================
+
+\subsection{The Benchmarks}
+
+\paragraph{Benchmark 1 --- SMA Crossover.}
+Select stocks where the 20-day SMA is above the 50-day SMA; allocate equally.
+This is a broad market-participation strategy. \textbf{Sharpe: 0.61.}
+
+\paragraph{Benchmark 2 --- Trailing Return Momentum.}
+Pick the top 10 Nasdaq-100 stocks by 30-day return; allocate equally.
+This is the tougher benchmark. \textbf{Sharpe: 1.01.}
+
+The goal is to beat \emph{both} in terms of Sharpe ratio.
+
+\subsection{New Strategy 1: Risk-Adjusted Momentum}
+
+\subsubsection{The Idea}
+
+Benchmark 2 simply asks ``which stocks went up the most?''
+But that's not quite the right question.
+A stock that gained 40\% in a month by whipping up and down every day is
+a very different proposition from one that steadily climbed 40\% with calm,
+consistent daily moves.
+
+The insight is to rank stocks not by raw return, but by their \emph{risk-adjusted} return:
+return divided by volatility, which is essentially a short-term Sharpe score for each stock.
+This way, volatile lottery-ticket stocks get penalised, and we end up selecting
+names whose gains were more reliable and sustainable.
+
+\subsubsection{How It Works}
+\begin{enumerate}[leftmargin=*]
+    \item Compute each stock's 30-day trailing return $r_i$ and
+          30-day rolling volatility $\hat{\sigma}_i$.
+    \item Score each stock: $s_i = r_i / \hat{\sigma}_i$.
+    \item Take the top 10 by score.
+    \item Split equally among them.
+\end{enumerate}
+
+\subsection{New Strategy 2: Regime-Filtered Momentum}
+
+\subsubsection{The Idea}
+
+One glaring weakness of pure momentum strategies is that they stay fully invested
+even when the whole market is falling.
+During the 2022 Nasdaq selloff, for instance, picking the ``best'' momentum stocks
+still meant riding the market down with everyone else.
+
+The fix is to add a \emph{market regime check} before doing anything.
+The idea: look at the entire Nasdaq-100 universe and count how many stocks are above
+their 100-day moving average.
+If fewer than 40\% are (meaning most stocks are in a downtrend), the portfolio goes
+entirely to cash and waits.
+Only when the market looks broadly healthy does the strategy go back to picking stocks.
+
+\subsubsection{How It Works}
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Check the regime.}
+          Compute the 100-day SMA for every stock.
+          If fewer than 40\% of stocks trade above their 100-day SMA, hold all cash
+          and skip the rest.
+    \item \textbf{Select stocks (only in a bull regime).}
+          Use the same risk-adjusted score $s_i = r_i / \hat{\sigma}_i$ to pick
+          the top 10 stocks.
+    \item \textbf{Weight by inverse volatility.}
+          Allocate more to the calmer stocks: $w_i \propto 1/\hat{\sigma}_i$.
+\end{enumerate}
+
+The breadth indicator (fraction of stocks above their long-run average) is a simple
+but reliable signal of market-wide health.
+When it flips bearish, the strategy steps aside rather than fighting the tape.
+
+\subsection{Results}
+
+\begin{table}[H]
+\centering
+\caption{New strategies vs.\ benchmarks (Apr 2021 -- Apr 2026).}
+\label{tab:d5}
+\begin{tabular}{lrrrrrr}
+\toprule
+Strategy & Cum.\ Ret. & Ann.\ Ret. & Ann.\ Vol. & Sharpe & Max DD & Win Rate \\
+\midrule
+Benchmark 1 --- SMA Crossover   &  72.00\% & 11.51\% & 18.98\% & 0.6061 & $-$37.71\% & 51.67\% \\
+Benchmark 2 --- Trailing Return & 239.09\% & 27.79\% & 27.60\% & 1.0068 & $-$43.25\% & 52.55\% \\
+\midrule
+\textbf{New 1 --- Risk-Adj.\ Momentum}  & \textbf{217.26\%} & \textbf{26.09\%} & \textbf{22.49\%} & \textbf{1.1598} & $-$31.27\% & 51.83\% \\
+\textbf{New 2 --- Regime-Filtered Mom.} & \textbf{142.30\%} & \textbf{19.45\%} & \textbf{16.71\%} & \textbf{1.1639} & $-$13.15\% & 40.91\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{results/d5_benchmark_nav.png}
+\caption{Portfolio value over time: new strategies vs.\ benchmarks.}
+\label{fig:d5}
+\end{figure}
+
+\subsection{Did It Work?}
+
+Yes --- both new strategies beat both benchmarks on Sharpe ratio.
+
+\textbf{Strategy 1 (Risk-Adjusted Momentum)} gets there by keeping returns high
+while cutting volatility.
+It earned 217\% cumulative return (not far behind Benchmark 2's 239\%),
+but with noticeably lower volatility: 22.5\% versus 27.6\%.
+The result is a Sharpe of 1.16 versus 1.01.
+The strategy is essentially saying: ``I still want to ride momentum, I just want
+to be smarter about \emph{which} momentum stocks I pick.''
+
+\textbf{Strategy 2 (Regime-Filtered Momentum)} takes a completely different approach.
+It gives up some return (142\% vs 239\%) in exchange for dramatically lower risk.
+Its maximum drawdown is only $-13.15\%$ --- compared to $-43.25\%$ for Benchmark 2.
+That's a 70\% reduction in worst-case loss.
+The regime filter worked exactly as intended: during the 2022 bear market, when
+Benchmark 2 was getting hammered, Strategy 2 was sitting in cash.
+When the market recovered, it came back in. The NAV curve in Figure~\ref{fig:d5}
+shows this clearly --- Strategy 2 is the smoothest line in the chart.
+
+\textbf{Which one is better?}
+It depends on what you care about.
+If you want maximum return and can stomach a drawdown of 30\%, Strategy 1 is the pick.
+If protecting capital and sleeping at night matters more, Strategy 2 is clearly superior.
+
+% =============================================================================
+\section{Conclusion}
+% =============================================================================
+
+This project produced a fully working backtesting engine along with a library of
+eleven trading strategies spanning momentum, mean reversion, and hybrid approaches.
+The system is clean enough that adding a new strategy takes maybe 30 lines of code,
+and everything --- charts, tables, logs --- gets saved automatically.
+
+The most interesting things I learned from running the experiments:
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Strategy type has to match the market environment.}
+          Momentum crushed mean reversion on NVDA because NVDA spent five years
+          in a structural uptrend. The same strategies applied to a range-bound
+          stock would likely flip the rankings.
+
+    \item \textbf{Signal quality beats weighting sophistication.}
+          Picking the right stocks (trailing return top-10) mattered far more than
+          how you weighted them. The SMA crossover signal never caught up to
+          trailing return, regardless of weighting scheme.
+
+    \item \textbf{A simple regime filter can dramatically reduce drawdown.}
+          Strategy 2's biggest contribution is showing that ``sometimes the best
+          trade is no trade.'' Going to cash when the market breadth is bad
+          cut the maximum drawdown by 70\% relative to the naive momentum benchmark.
+
+\end{itemize}
+
+\end{document}
